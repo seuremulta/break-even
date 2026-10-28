@@ -1,6 +1,6 @@
 # BreakEven
 
-**Finance and Audit Tracking Platform** for the CCS Student Council.
+**Finance and Audit Tracking Platform** for Student Councils 
 *Where every claim checks out.*
 
 BreakEven is a Java Swing desktop app that tracks a student council's budget from allocation to liquidation. Officers log expense claims, auditors review them, and the moderator grants clearance and monitors budget trends. Every action is written to a timestamped audit log.
@@ -244,4 +244,4 @@ The database layer is a work in progress. Please be aware of the following:
 
 ## Authors
 
-Created for the CCS Student Council finance and audit workflow.
+Created for Student Councils and finance and audit workflow.
