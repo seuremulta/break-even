@@ -1,6 +1,5 @@
 package breakeven;
 
-import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -11,6 +10,11 @@ import java.util.List;
 import static breakeven.Theme.TS;
 import static breakeven.Theme.peso;
 
+/**
+ * The app's state (users, semesters, audit log), its budget maths and the review workflow.
+ * OOP [ENCAPSULATION]: all state is private; the rest of the app reads it through the methods below.
+ * OOP [ABSTRACTION]: every database operation is delegated to Database, so Store contains no SQL.
+ */
 final class Store {
 
     private Store() {}
@@ -64,28 +68,29 @@ final class Store {
 
     static Semester startSemester(String label, double total) {
         Semester old = latestOpen();
-        if (old != null) {
-            old.close();
-            saveSemesterToDB(old);
-        }
+        if (old != null) old.close();
         int n = semesters.size() + 1;
         Semester s = new Semester("SEM-" + n, label, new Budget("BUD-" + n, total));
         semesters.add(s);
         viewing = s;
-        saveSemesterToDB(s);
-        saveBudgetToDB(s.getBudget(), s.getId());
+        Database.saveNewSemester(old, s);                     // closing the old one + opening the new one: one transaction
         return s;
     }
 
     // ---------------------------------------------------------------- mutation (controlled)
-    static void addClaim(Claim c)       { viewing.addClaim(c); saveClaimToDB(c); }
-    static void removeClaim(Claim c)    { viewing.removeClaim(c); deleteClaimFromDB(c.getRef()); }
-    static void addEvent(Event e)       { viewing.requireOpen(); budget().addEvent(e); saveEventToDB(e); }
-    static void removeEvent(Event e)    { viewing.requireOpen(); budget().removeEvent(e); deleteEventFromDB(e.getName()); }
-    static void addReport(Report r)     { viewing.addReport(r); saveReportToDB(r); }
-    static void removeReport(Report r)  { viewing.removeReport(r); deleteReportFromDB(r.getId()); }
+    static void addClaim(Claim c)       { viewing.addClaim(c); saveClaim(c); }
+    static void removeClaim(Claim c)    { viewing.removeClaim(c); Database.deleteClaim(c.getRef()); }
+    static void addEvent(Event e)       { viewing.requireOpen(); budget().addEvent(e); saveEvent(e); }
+    static void removeEvent(Event e)    { viewing.requireOpen(); budget().removeEvent(e); Database.deleteEvent(viewing.getId(), e.getName()); }
+    static void addReport(Report r)     { viewing.addReport(r); saveReport(r); }
+    static void removeReport(Report r)  { viewing.removeReport(r); Database.deleteReport(r.getId()); }
 
-    static void saveEvent(Event e)      { saveEventToDB(e); }
+    // ---- "I changed an existing object, store it" (pages call these after editing a claim / event / budget / report)
+    static void saveClaim(Claim c)      { Database.saveClaim(viewing.getId(), c); }
+    static void saveEvent(Event e)      { Database.saveEvent(viewing.getId(), e); }
+    static void saveReport(Report r)    { Database.saveReport(viewing.getId(), r); }
+    static void saveBudget()            { Database.saveBudget(viewing.getId(), budget()); }
+    static void saveBudgetAndEvent(Event e) { Database.saveBudgetAndEvent(viewing.getId(), budget(), e); }
 
     // ---------------------------------------------------------------- lookups
     static User authenticate(String username, String password) {
@@ -101,6 +106,24 @@ final class Store {
         l.sort(Comparator.comparing(Claim::getRef));
         return l;
     }
+
+    /**
+     * Other claims, in ANY semester, that carry the same receipt / OR number (used to warn about double claims).
+     * Case, spaces and dashes are ignored, so "OR-2026-0455" and "or 2026 0455" count as the same receipt.
+     * 'except' is left out of the result (pass the claim being edited, or null for a new claim).
+     */
+    static List<Claim> claimsWithReceipt(String receiptNo, Claim except) {
+        String key = receiptKey(receiptNo);
+        List<Claim> l = new ArrayList<>();
+        if (key.isEmpty()) return l;
+        for (Semester sem : semesters)
+            for (Claim c : sem.getClaims())
+                if (c != except && receiptKey(c.getReceiptNo()).equals(key)) l.add(c);
+        l.sort(Comparator.comparing(Claim::getRef));
+        return l;
+    }
+
+    private static String receiptKey(String s) { return s == null ? "" : s.replaceAll("[^A-Za-z0-9]", "").toLowerCase(); }
 
     static List<Claim> eligible(String ev) {
         List<Claim> l = new ArrayList<>();
@@ -156,19 +179,19 @@ final class Store {
         String userStr = current == null ? "system" : current.signature();
         LogEntry entry = new LogEntry(timeStr, userStr, action);
         logs.add(0, entry);
-        saveLogToDB(entry);
+        Database.saveLog(entry);
     }
 
     // ---------------------------------------------------------------- review workflow
     static void approve(Claim c) {
         c.approve();
-        saveClaimToDB(c);
+        saveClaim(c);
         log("Approved claim " + c.getRef() + " (" + peso(c.getAmount()) + ")");
     }
 
     static void flag(Claim c, String note) {
         c.flag(note);
-        saveClaimToDB(c);
+        saveClaim(c);
         log("Flagged " + c.getRef() + ": " + note);
     }
 
@@ -179,173 +202,22 @@ final class Store {
         if (c.getAmount() > remaining(k))
             return "Cannot clear: amount exceeds the remaining allocation for " + k.getName() + " (" + peso(remaining(k)) + ").";
         c.clear();
-        saveClaimToDB(c);
+        saveClaim(c);
         log("Granted clearance for " + c.getRef() + " (" + peso(c.getAmount()) + "), budget balance updated");
         return null;
     }
 
-    // ---------------------------------------------------------------- DATABASE PERSISTENCE HELPERS
-    private static void saveSemesterToDB(Semester s) {
-        if (s == null) return;
-        String sql = "INSERT INTO semesters (id, label, is_closed) VALUES (?, ?, ?) " +
-                     "ON DUPLICATE KEY UPDATE label=?, is_closed=?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, s.getId());
-            ps.setString(2, s.getLabel());
-            ps.setBoolean(3, s.isClosed());
-            ps.setString(4, s.getLabel());
-            ps.setBoolean(5, s.isClosed());
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Semester Saved]: " + s.getId());
-        } catch (SQLException e) { System.err.println(">>> MYSQL ERROR [Semester]: " + e.getMessage()); }
-    }
-
-    private static void saveBudgetToDB(Budget b, String semesterId) {
-        if (b == null) return;
-        String sql = "INSERT INTO budgets (id, semester_id, total_amount, contingency) VALUES (?, ?, ?, ?) " +
-                     "ON DUPLICATE KEY UPDATE semester_id=?, total_amount=?, contingency=?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, b.getBudgetId());
-            ps.setString(2, semesterId);
-            ps.setDouble(3, b.getTotalAmount());
-            ps.setDouble(4, b.getContingency());
-            ps.setString(5, semesterId);
-            ps.setDouble(6, b.getTotalAmount());
-            ps.setDouble(7, b.getContingency());
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Budget Saved]: " + b.getBudgetId());
-        } catch (SQLException e) { System.err.println(">>> MYSQL ERROR [Budget]: " + e.getMessage()); }
-    }
-
-    static void saveClaimToDB(Claim c) {
-        if (c == null) return;
-        String sql = "INSERT INTO claims (ref, description, claimant, amount, category, date, receipt_no, event_name, status, discrepancy, notes, receipt_file) " +
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
-                     "ON DUPLICATE KEY UPDATE description=?, claimant=?, amount=?, category=?, date=?, receipt_no=?, event_name=?, status=?, discrepancy=?, notes=?, receipt_file=?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, c.getRef());
-            ps.setString(2, c.getDesc());
-            ps.setString(3, c.getClaimant());
-            ps.setDouble(4, c.getAmount());
-            ps.setString(5, c.getCategory());
-            ps.setString(6, c.getDate());
-            ps.setString(7, c.getReceiptNo());
-            ps.setString(8, c.getEvent());
-            ps.setString(9, c.getStatus().name());
-            ps.setString(10, c.getDiscrepancy());
-            ps.setString(11, c.getNotes());
-            ps.setString(12, c.getReceiptFile());
-
-            ps.setString(13, c.getDesc());
-            ps.setString(14, c.getClaimant());
-            ps.setDouble(15, c.getAmount());
-            ps.setString(16, c.getCategory());
-            ps.setString(17, c.getDate());
-            ps.setString(18, c.getReceiptNo());
-            ps.setString(19, c.getEvent());
-            ps.setString(20, c.getStatus().name());
-            ps.setString(21, c.getDiscrepancy());
-            ps.setString(22, c.getNotes());
-            ps.setString(23, c.getReceiptFile());
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Claim Saved]: " + c.getRef());
-        } catch (SQLException e) { System.err.println(">>> MYSQL ERROR [Claim Save Failed]: " + e.getMessage()); }
-    }
-
-    private static void deleteClaimFromDB(String ref) {
-        String sql = "DELETE FROM claims WHERE ref = ?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, ref);
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Claim Deleted]: " + ref);
-        } catch (SQLException e) { System.err.println(">>> MYSQL ERROR [Delete Claim]: " + e.getMessage()); }
-    }
-
-    static void saveEventToDB(Event e) {
-        if (e == null) return;
-        String sql = "INSERT INTO events (name, allocated) VALUES (?, ?) ON DUPLICATE KEY UPDATE allocated=?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, e.getName());
-            ps.setDouble(2, e.getAllocated());
-            ps.setDouble(3, e.getAllocated());
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Event Saved]: " + e.getName());
-        } catch (SQLException ex) { System.err.println(">>> MYSQL ERROR [Event Save Failed]: " + ex.getMessage()); }
-    }
-
-    private static void deleteEventFromDB(String name) {
-        String sql = "DELETE FROM events WHERE name = ?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, name);
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Event Deleted]: " + name);
-        } catch (SQLException ex) { System.err.println(">>> MYSQL ERROR [Delete Event]: " + ex.getMessage()); }
-    }
-
-    private static void saveReportToDB(Report r) {
-        if (r == null) return;
-        String sql = "INSERT INTO reports (id, event_name, count, total, projected, filed_by, date, reviewed_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
-                     "ON DUPLICATE KEY UPDATE event_name=?, count=?, total=?, projected=?, filed_by=?, date=?, reviewed_by=?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, r.getId());
-            ps.setString(2, r.getEvent());
-            ps.setInt(3, r.getCount());
-            ps.setDouble(4, r.getTotal());
-            ps.setDouble(5, r.getProjected());
-            ps.setString(6, r.getFiledBy());
-            ps.setString(7, r.getDate());
-            ps.setString(8, r.getReviewedBy());
-
-            ps.setString(9, r.getEvent());
-            ps.setInt(10, r.getCount());
-            ps.setDouble(11, r.getTotal());
-            ps.setDouble(12, r.getProjected());
-            ps.setString(13, r.getFiledBy());
-            ps.setString(14, r.getDate());
-            ps.setString(15, r.getReviewedBy());
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Report Saved]: " + r.getId());
-        } catch (SQLException ex) { System.err.println(">>> MYSQL ERROR [Report]: " + ex.getMessage()); }
-    }
-
-    private static void deleteReportFromDB(String id) {
-        String sql = "DELETE FROM reports WHERE id = ?";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, id);
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Report Deleted]: " + id);
-        } catch (SQLException ex) { System.err.println(">>> MYSQL ERROR [Delete Report]: " + ex.getMessage()); }
-    }
-
-    private static void saveLogToDB(LogEntry entry) {
-        if (entry == null) return;
-        String sql = "INSERT INTO logs (id, timestamp, user, action) VALUES (?, ?, ?, ?)";
-        try (Connection conn = DBConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (conn == null) return;
-            ps.setString(1, entry.getId());
-            ps.setString(2, entry.getTime());
-            ps.setString(3, entry.getUser());
-            ps.setString(4, entry.getAction());
-            ps.executeUpdate();
-            System.out.println(">>> MYSQL SUCCESS [Log Saved]: " + entry.getId());
-        } catch (SQLException ex) { System.err.println(">>> MYSQL ERROR [Log]: " + ex.getMessage()); }
+    // ---------------------------------------------------------------- startup
+    /**
+     * Called once by Main. Loads the saved data from MySQL; if the database is empty it is filled with the demo data,
+     * and if MySQL cannot be reached the demo data is kept in memory only (Database.problem() says why).
+     */
+    static void init() {
+        if (!Database.connect() || !Database.loadAll(semesters, logs) || semesters.isEmpty()) {
+            seed();
+            return;
+        }
+        viewing = currentSemester();
     }
 
     // ---------------------------------------------------------------- demo seed data
@@ -354,61 +226,62 @@ final class Store {
         return new Claim(ref, desc, by, amt, type, date, or, ev, st, disc);
     }
 
-    static void seed() {
+    private static void seed() {
         String VE = "Venue & Equipment", FR = "Food & Refreshments", PM = "Printing & Materials",
                 TR = "Transportation", HF = "Honoraria & Fees";
 
+        // ---- last semester (closed once the new one starts)
         Semester old = startSemester("A.Y. 2025-2026 - 2nd Sem", 420000);
         Budget ob = old.getBudget();
         ob.setContingency(40000);
-        saveBudgetToDB(ob, old.getId());
+        saveBudget();
 
-        Event ev1 = new Event("Intramurals", 60000);
-        Event ev2 = new Event("General Assembly", 25000);
-        ob.addEvent(ev1); saveEventToDB(ev1);
-        ob.addEvent(ev2); saveEventToDB(ev2);
+        addEvent(new Event("Intramurals", 60000));
+        addEvent(new Event("General Assembly", 25000));
 
-        Claim c1 = mk("EXP-0071", "Referee Fees - Intramurals", "C. Refalbor", 12000, HF, "2025-03-10", "OR-2025-0201", "Intramurals", ClaimStatus.CLEARED, "");
-        Claim c2 = mk("EXP-0072", "Water & Snacks - Intramurals", "S. Remulta", 8400, FR, "2025-03-11", "OR-2025-0205", "Intramurals", ClaimStatus.CLEARED, "");
-        Claim c3 = mk("EXP-0073", "Meeting Snacks - General Assembly", "V. Po", 3200, FR, "2025-03-14", "OR-2025-0214", "General Assembly", ClaimStatus.CLEARED, "");
-        old.addClaim(c1); saveClaimToDB(c1);
-        old.addClaim(c2); saveClaimToDB(c2);
-        old.addClaim(c3); saveClaimToDB(c3);
+        addClaim(mk("EXP-0071", "Referee Fees - Intramurals", "C. Refalbor", 12000, HF, "2026-03-10", "OR-2026-0201", "Intramurals", ClaimStatus.CLEARED, ""));
+        addClaim(mk("EXP-0072", "Water & Snacks - Intramurals", "S. Remulta", 8400, FR, "2026-03-11", "OR-2026-0205", "Intramurals", ClaimStatus.CLEARED, ""));
+        addClaim(mk("EXP-0073", "Meeting Snacks - General Assembly", "V. Po", 3200, FR, "2026-03-14", "OR-2026-0214", "General Assembly", ClaimStatus.CLEARED, ""));
 
-        Report lr = new Report("LR-001", "Intramurals", 2, 20400, 60000, "F. Fernandes", "2025-03-20");
+        Report lr = new Report("LR-001", "Intramurals", 2, 20400, 60000, "F. Fernandes", "2026-03-20");
         lr.review("Prof. D. Santos");
-        old.addReport(lr); saveReportToDB(lr);
+        addReport(lr);
 
         log("Granted clearance for EXP-0071");
         log("Granted clearance for EXP-0072");
         log("Granted clearance for EXP-0073");
 
-        Semester curSem = startSemester("A.Y. 2026-2027 - 1st Sem", 485000);
+        // ---- this semester (open)
+        startSemester("A.Y. 2026-2027 - 1st Sem", 485000);
         Budget b = budget();
         b.setContingency(60000);
-        saveBudgetToDB(b, curSem.getId());
+        saveBudget();
 
-        Event e1 = new Event("Acquaintance Party", 80000);
-        Event e2 = new Event("Foundation Week", 30000);
-        Event e3 = new Event("Leadership Training", 40000);
-        b.addEvent(e1); saveEventToDB(e1);
-        b.addEvent(e2); saveEventToDB(e2);
-        b.addEvent(e3); saveEventToDB(e3);
+        addEvent(new Event("Acquaintance Party", 80000));
+        addEvent(new Event("Foundation Week", 30000));
+        addEvent(new Event("Leadership Training", 40000));
 
-        addClaim(mk("EXP-0091", "Stage Rental - Acquaintance Party", "C. Refalbor", 28500, VE, "2025-09-02", "OR-2025-0455", "Acquaintance Party", ClaimStatus.CLEARED, ""));
-        addClaim(mk("EXP-0090", "Catering - ACQ", "S. Remulta", 14200, FR, "2025-08-28", "OR-2025-0441", "Acquaintance Party", ClaimStatus.PENDING, ""));
-        addClaim(mk("EXP-0089", "Printing - ACQ Pins (x12)", "V. Po", 6800, PM, "2025-08-25", "OR-2025-0430", "Acquaintance Party", ClaimStatus.CLEARED, ""));
-        addClaim(mk("EXP-0088", "Sound System Rental - ACQ", "N. Mahipus", 18000, VE, "2025-08-20", "OR-2025-0412", "Acquaintance Party", ClaimStatus.FLAGGED, "Auditor note: receipt total differs from quotation"));
+        addClaim(mk("EXP-0091", "Stage Rental - Acquaintance Party", "C. Refalbor", 28500, VE, "2026-09-02", "OR-2026-0455", "Acquaintance Party", ClaimStatus.CLEARED, ""));
+        addClaim(mk("EXP-0090", "Catering - ACQ", "S. Remulta", 14200, FR, "2026-08-28", "OR-2026-0441", "Acquaintance Party", ClaimStatus.PENDING, ""));
+        addClaim(mk("EXP-0089", "Printing - ACQ Pins (x12)", "V. Po", 6800, PM, "2026-08-25", "OR-2026-0430", "Acquaintance Party", ClaimStatus.CLEARED, ""));
+        addClaim(mk("EXP-0088", "Sound System Rental - ACQ", "N. Mahipus", 18000, VE, "2026-08-20", "OR-2026-0412", "Acquaintance Party", ClaimStatus.FLAGGED, "Auditor note: receipt total differs from quotation"));
 
         String[] d = {"Transportation", "Snacks for Volunteers", "Certificates", "Venue Decorations", "Registration Supplies", "Banner Printing"};
         String[] t = {TR, FR, PM, VE, PM, PM};
         double[] a = {3200, 3800, 3500, 4000, 4500, 5000};
         for (int i = 0; i < 6; i++)
             addClaim(mk(String.format("EXP-%04d", 82 + i), d[i] + " - Foundation Week", "C. Refalbor", a[i],
-                    t[i], "2025-08-1" + (i + 1), "OR-2025-03" + (10 + i), "Foundation Week", ClaimStatus.PENDING, ""));
+                    t[i], "2026-08-1" + (i + 1), "OR-2026-03" + (10 + i), "Foundation Week",
+                    i == 0 ? ClaimStatus.APPROVED : ClaimStatus.PENDING, ""));   // EXP-0082 waits in the Moderator's Clearance queue
+
+        // a filed (not yet reviewed) report, so the Moderator has something to review too
+        addReport(new Report("LR-002", "Acquaintance Party", 2, 35300, 80000, "F. Fernandes", "2026-09-05"));
 
         log("Flagged EXP-0088: receipt total differs from quotation");
         log("Approved claim EXP-0089");
+        log("Granted clearance for EXP-0089");
         log("Granted clearance for EXP-0091");
+        log("Approved claim EXP-0082");
+        log("Filed liquidation report LR-002 for Acquaintance Party (2 claims, " + peso(35300) + ")");
     }
 }

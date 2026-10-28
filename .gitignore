@@ -1,0 +1,22 @@
+# Maven build output
+target/
+
+# Receipts copied in by ReceiptVault at runtime (may contain personal data)
+receipts/
+
+# Your real database settings (copy db.properties.example to db.properties)
+db.properties
+
+# VS Code / IDE settings
+.vscode/
+.idea/
+*.iml
+nbproject/
+nbactions.xml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

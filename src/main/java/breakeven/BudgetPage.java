@@ -65,7 +65,7 @@ class BudgetPage extends Page {
             return;
         }
         if (e == null) { addEvent(new Event(name.trim(), v)); log("Event allocation created: " + name.trim() + " (" + peso(v) + ")"); }
-        else { log("Changed " + e.getName() + " allocation " + peso(e.getAllocated()) + " -> " + peso(v)); e.setAllocated(v); }
+        else { log("Changed " + e.getName() + " allocation " + peso(e.getAllocated()) + " -> " + peso(v)); e.setAllocated(v); saveEvent(e); }
         app().refreshAll();
     }
 
@@ -84,6 +84,7 @@ class BudgetPage extends Page {
         }
         log("Changed " + e.getName() + " allocation " + peso(e.getAllocated()) + " -> " + peso(v));
         e.setAllocated(v);   // OOP [ENCAPSULATION]: goes through the validated setter
+        saveEvent(e);
         app().refreshAll();
     }
 
@@ -111,6 +112,7 @@ class BudgetPage extends Page {
         if (!b.canSetTotal(v)) { warn(this, "The total cannot be lower than what is already committed to events and contingency (" + peso(b.committed()) + ")."); return; }
         log("Changed total budget for " + semester().getLabel() + " " + peso(b.getTotalAmount()) + " -> " + peso(v));
         b.setTotalAmount(v);
+        saveBudget();
         app().refreshAll();
     }
 
@@ -123,6 +125,7 @@ class BudgetPage extends Page {
         if (!b.canSetContingency(v)) { warn(this, "Contingency can be at most " + peso(b.getTotalAmount() - b.totalAllocated()) + " (total minus event allocations)."); return; }
         log("Changed contingency " + peso(b.getContingency()) + " -> " + peso(v));
         b.setContingency(v);
+        saveBudget();
         app().refreshAll();
     }
 
@@ -137,6 +140,7 @@ class BudgetPage extends Page {
         if (v == null || v <= 0) { warn(this, "Enter a valid amount greater than zero."); return; }
         if (v > b.getContingency()) { warn(this, "Only " + peso(b.getContingency()) + " is left in contingency."); return; }
         b.drawContingency(e, v);
+        saveBudgetAndEvent(e);                               // budget + event saved together
         log("Drew " + peso(v) + " from contingency into " + e.getName() + " (now " + peso(e.getAllocated()) + ")");
         app().refreshAll();
     }

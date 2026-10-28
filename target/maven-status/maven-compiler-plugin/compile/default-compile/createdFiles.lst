@@ -11,6 +11,7 @@ breakeven\ClaimDetails.class
 breakeven\Ui$2.class
 breakeven\Theme.class
 breakeven\LoginPanel.class
+breakeven\Database$Work.class
 breakeven\Ui$1.class
 breakeven\EventHistoryPage.class
 breakeven\TrendsPage.class
@@ -24,7 +25,6 @@ breakeven\ClaimStatus$1.class
 breakeven\DashboardPage$1.class
 breakeven\Exportable.class
 breakeven\BarChart.class
-breakeven\BreakEven.class
 breakeven\LiquidationPage.class
 breakeven\LoginPanel$RoundButton.class
 breakeven\EventHistoryPage$1.class
@@ -50,6 +50,7 @@ breakeven\Main.class
 breakeven\LoginPanel$Field$1.class
 breakeven\Moderator.class
 breakeven\LoginPanel$Field.class
+breakeven\Database.class
 breakeven\LogEntry.class
 breakeven\PH.class
 breakeven\LoginPanel$4.class

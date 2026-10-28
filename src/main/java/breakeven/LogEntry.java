@@ -6,12 +6,24 @@ package breakeven;
  */
 class LogEntry extends Entity {
 
-    private static int seq = 0;                       // gives every entry a LOG-0001 style id
+    private static int seq = 0;                       // gives every new entry a LOG-0001 style id
     private final String time, user, action;
 
-    LogEntry(String time, String user, String action) {
-        super(String.format("LOG-%04d", ++seq));
+    /** A brand-new entry: the id continues after the highest one seen so far. */
+    LogEntry(String time, String user, String action) { this(nextId(), time, user, action); }
+
+    /** An entry read back from the database. Moves the counter forward so new ids never repeat old ones. */
+    LogEntry(String id, String time, String user, String action) {
+        super(id);
+        syncSeq(id);
         this.time = time; this.user = user; this.action = action;
+    }
+
+    private static String nextId() { return String.format("LOG-%04d", ++seq); }
+
+    private static void syncSeq(String id) {
+        try { seq = Math.max(seq, Integer.parseInt(id.substring(id.indexOf('-') + 1))); }
+        catch (RuntimeException ignored) { /* unusual id: leave the counter alone */ }
     }
 
     String getTime()   { return time; }

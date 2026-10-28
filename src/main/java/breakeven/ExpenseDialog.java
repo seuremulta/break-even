@@ -6,6 +6,7 @@ import java.awt.*;
 import java.io.File;
 import java.time.LocalDate;
 import java.util.Arrays;
+import java.util.List;
 
 import static breakeven.Store.*;
 import static breakeven.Theme.*;
@@ -107,6 +108,31 @@ class ExpenseDialog extends JDialog {
         Event target = event(ev);
         if (target == null) { warn(this, "That event has no budget allocation yet. Create it under Budget Allocation first."); return; }
         String type = (String) category.getSelectedItem();
+
+        // Duplicate receipt check: the same receipt / OR number should normally be claimed only once.
+        // The officer may still go ahead (one receipt can legitimately cover several items), but the claim is
+        // marked for the auditor and the event is written to the audit log.
+        List<Claim> dups = claimsWithReceipt(rc, edit);
+        String dupNote = "", dupRefs = "";
+        if (!dups.isEmpty()) {
+            StringBuilder list = new StringBuilder(), refs = new StringBuilder();
+            for (int i = 0; i < dups.size(); i++) {
+                Claim o = dups.get(i);
+                refs.append(i == 0 ? "" : ", ").append(o.getRef());
+                if (i < 5) list.append("   - ").append(o.getRef()).append("  |  ").append(o.getClaimant()).append("  |  ")
+                        .append(peso(o.getAmount())).append("  |  ").append(o.getEvent()).append("  |  ").append(o.getStatus().label()).append("\n");
+            }
+            if (dups.size() > 5) list.append("   ... and ").append(dups.size() - 5).append(" more\n");
+            int ok = JOptionPane.showConfirmDialog(this,
+                    "Receipt / OR No. \"" + rc + "\" is already used on:\n" + list
+                            + "\nThe same receipt should normally be claimed only once.\n"
+                            + "Submit anyway? The claim will be marked for the auditor.",
+                    "Duplicate receipt number", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (ok != JOptionPane.YES_OPTION) return;
+            dupRefs = refs.toString();
+            dupNote = "System: receipt/OR no. " + rc + " is also used on " + dupRefs;
+        }
+
         double rem = remaining(target);
         ClaimStatus status = ClaimStatus.PENDING;
         String disc = "";
@@ -117,6 +143,8 @@ class ExpenseDialog extends JDialog {
             if (ok != JOptionPane.YES_OPTION) return;
             status = ClaimStatus.FLAGGED;
         }
+        String flagReason = disc.isEmpty() ? "" : disc.substring(8);       // the over-allocation text, for the audit log
+        if (!dupNote.isEmpty()) disc = disc.isEmpty() ? dupNote : disc + "  |  " + dupNote;   // both notes reach the auditor
         String ref = edit == null ? nextRef() : edit.getRef();
         String stored = ReceiptVault.archive(ref, attachedPath);     // keep a safe copy of the receipt
         Claim x;
@@ -129,9 +157,11 @@ class ExpenseDialog extends JDialog {
             x = edit;
             x.update(d, cl, amt, rc, dt, ev, type, notes.getText().trim(), stored);   // OOP [ENCAPSULATION]: validated update
             x.resubmit(status, disc);
+            saveClaim(x);                                                              // store the corrected claim
             log("Resubmitted claim " + x.getRef() + " (" + peso(amt) + ")");
         }
-        if (status == ClaimStatus.FLAGGED) log("System flagged " + x.getRef() + ": " + disc.substring(8));
+        if (status == ClaimStatus.FLAGGED) log("System flagged " + x.getRef() + ": " + flagReason);
+        if (!dupNote.isEmpty()) log("Duplicate receipt no. " + rc + " on " + x.getRef() + " (also used on " + dupRefs + ")");
         dispose();
         app().refreshAll();
     }

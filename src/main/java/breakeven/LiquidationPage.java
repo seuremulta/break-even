@@ -59,6 +59,7 @@ class LiquidationPage extends Page {
             if (r < 0) { msg(this, "Select a filed report first."); return; }
             Report rep = reports().get(r);
             if (!rep.review(current().getName())) { msg(this, rep.getId() + " has already been reviewed."); return; }
+            saveReport(rep);
             log("Reviewed liquidation report " + rep.getId() + " (" + rep.getEvent() + ")");
             app().refreshAll();
         });
